@@ -6,7 +6,7 @@ gets their own copy of the instrument and can interact with it independently of 
 
 ## Usage
 
-```
+```python
 from server import Server, Experiment
 from instrument import VirtualInstrument, FloatProperty
 
@@ -51,7 +51,7 @@ if __name__ == "__main__":
 
 We can now connect to the server and run code like
 
-```
+```python
 import pyvisa
 rm = pyvisa.ResourceManager()
 voltmeter = rm.open_resource('TCPIP::127.0.0.1::9001::SOCKET', read_termination='\n')
