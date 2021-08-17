@@ -1,44 +1,11 @@
 import queue
 import re
+import scpi
+import numpy as np
+from enum import IntEnum
 
 class ProtocolError(ValueError):
     pass
-
-def scpi_parse(command, parent):
-    # The parsing rules are more IEEE 488.2 rather than SCPI with
-    # the obvious exception of expanding short-form mnemonics to long form.
-    #
-    # This does not support channel lists. Ideally one would define a CFG.
-    #
-    parser = re.compile(r'''^ # Whole string
-                            (?P<cmd>
-                              (\*\w+)|
-                              (:?[A-Za-z0-9]+) # First header
-                              (:[A-Za-z0-9]+)*) # Any following headers
-                            (?P<query>\?)?   # Optional query marker
-                            (\s+             # Whitespace in front of the argument list
-                              (?P<args>
-                                 ([^,]+)       # First argument
-                                 (,\s*([^,]+))* # Further arguments
-                              )
-                             )?$                # Argument list is optional''',
-                        re.VERBOSE)
-    m = parser.match(command)
-    if m is None:
-        raise ValueError(f"Unparsable `{command.decode('ascii')}`")
-    cmd = m.group('cmd').strip().lower()
-    if not cmd.startswith(':'):
-        cmd = parent + cmd
-    parent = ':'.join(cmd.split(':')[:-1])
-        
-    query = m.group('query') is not None
-    if m.group('args') is not None:
-        args = list(map(str.strip, m.group('args').split(',')))
-    else:
-        args = ()
-    
-    return parent, cmd, query, args
-
 
 class SCPI_receiver:
 
@@ -52,7 +19,7 @@ class SCPI_receiver:
         self.error_log = []
         self.lineending = b'\n'
 
-    def add_command(self, cmd, entrypoint):
+    def add_command(self, cmd, handler):
         """Add a SCPI command `cmd` to the list of recognized commands.
         
         The command will be parsed and added in all versions. Short forms
@@ -60,13 +27,13 @@ class SCPI_receiver:
         
         locations = [self.commands]
         optional = False
-        subcmds = cmd.lower().split(':')
+        subcmds = cmd.upper().split(':')
         if subcmds[0] == '[':
             optional = True
         elif subcmds[0].startswith('*'):
             if len(subcmds) > 1:
                 raise ValueError(f"Standard IEEE commands cannot contain colons")
-            self.commands[subcmds[0]] = {None: entrypoint}
+            self.commands[subcmds[0]] = {None: handler}
             return
         elif subcmds[0] != '':
             raise ValueError(f'Commands should be specified in full form from root (:A[:B]:C)')
@@ -86,12 +53,12 @@ class SCPI_receiver:
                 if tkn not in dct:
                     dct[tkn] = {}
                     if len(tkn) > 4: # adding short mnemonic
-                        if tkn[3] in 'aeiouy':
+                        if tkn[3] in 'AEIOUY':
                             short_tkn = tkn[:3]
                         else:
                             short_tkn = tkn[:4]
                         if short_tkn in dct:
-                            raise ValueError(f'Duplicate short mnemonic {short_tkn.upper()} generated from {tkn}')
+                            raise ValueError(f'Duplicate short mnemonic {short_tkn} generated from {tkn.lower()}')
                         dct[short_tkn] = dct[tkn]
                 next_locations.append(dct[tkn])
                 if optional:
@@ -105,138 +72,187 @@ class SCPI_receiver:
             if None in dct:
                 raise ValueError(f'Command {cmd} already registered')
             else:
-                dct[None] = entrypoint
+                dct[None] = handler
                 
     def log_error(self, message):
         self.error_log.append(message)
 
-    def find(self, cmd):
+    def find(self, header, parent):
         """Finds code responsible for the command.
         Assumes `cmd` is lowercase"""
-        dct = self.commands
-        if cmd.startswith('*'):
-            if cmd not in dct:
-                self.log_error(f"{cmd} not found")
-                return None
-            return dct[cmd][None]
-        elif cmd.startswith(':'):
-            for tkn in cmd.split(':')[1:]:
+        
+        def resolve(tokens):
+            dct = self.commands
+            # print(tokens)
+            for tkn in tokens:
                 if tkn not in dct:
-                    self.log_error(f"{tkn} not found [in {cmd}]")
                     return None
                 dct = dct[tkn]
+            if None in dct:
+                return dct[None]
+            return None
+        
+        subcmds = header.split(':')
+        if not subcmds[0]: # Global command
+            handler = resolve(subcmds[1:])
+            if handler is None:
+                raise ProtocolError(f"Unknown command `{header}`")
+            return handler, subcmds[1:-1]
+        elif subcmds[0][0] == '*': # Common commands
+            if len(subcmds) > 1:
+                raise ProtocolError(f'Invalid common command {header}')
+            elif subcmds[0] in self.commands:
+                # IEEE 488.2 A.1.1 (6)
+                return self.commands[subcmds[0]][None], parent
+            else:
+                raise ProtocolError(f'Unknown command command {header}')
         else:
-            raise ValueError(f'Unsupported command form {cmd}')
-        return dct[None]
+            handler = resolve(parent + subcmds)
+            if handler is None:
+                raise ProtocolError(f'Unknown command {header}')
+            return handler, parent + subcmds[:-1]
 
-    def process(self, line):# -> List[String]:
-        parent = ""
-        response = []
-        for command in map(str.strip, line.split(';')):
-            parent, cmd, query, args = scpi_parse(command, parent)
-            entrypoint = self.find(cmd)
-            if entrypoint is None:
-                break
-            try:
-                if query:
-                    response.append(entrypoint.get(*args))
-                else:
-                    response.append(entrypoint.set(*args))
-            except ProtocolError as e:
-                self.log_error(f'ERROR: {command} {e.msg}')
-        return [r for r in response if r is not None]
-                
+    def process(self, line):
+        parent = []
+        for command in scpi.parse(line).commands:
+            if isinstance(command, str):
+                raise ProtocolError(f'Unparseable command `{command}`')
+
+            if not command.header:
+                continue
+
+            handler, parent = self.find(command.header, parent)
+
+#            try:
+            yield handler(command.query, *command.args)
+#            except TypeError as e:
+#                raise ProtocolError(f'wrong number of arguments')
+
     def process_messages(self):
         while not self.iqueue.empty():
             try:
-                line = self.iqueue.get_nowait().decode('ascii')
+                line = self.iqueue.get_nowait().decode('latin1').upper()
             except queue.Empty:
                 # Should not really happen since this instrument
                 # is the only consumer
                 break
 
-            for resp in self.process(line):
-                try:
-                    if resp is not None:
-                        self.oqueue.put(resp.encode("ascii") + b'\n')
-                except queue.Full:
-                    # The socket is not sending. Bad.
-                    print(f"Queue full on {self.name}")
-                    self.oqueue.join() # let's block
+            try:
+                for response in self.process(line):
+                    if response is not None:
+                        self.oqueue.put(response.encode("latin1") + b'\n')
+            except ProtocolError as e:
+                self.log_error(f'ERROR: {line} {e}')
+            except queue.Full:
+                # The socket is not sending. Bad.
+                print(f"Queue full on {self.name}")
+                self.oqueue.join() # let's block
 
-class ConstProperty:
-    def __init__(self, value):
-        self.value = str(value)
-        
-    def get(self, *args):
+def symbol(value):
+    """A SCPI handler for a symbol value"""
+    def handle(query, *args):
+        if not query: 
+            raise ProtocolError('not settable')
         if args:
-            raise ValueError(f'arguments {args} not supported')
+            raise ProtocolError(f'arguments {args} not supported')
         else:
-            return self.value
-     
-    def set(self, *args):
-        raise ValueError('not settable')
+            return value
+    return handle
 
-class ExtProperty:
-    def __init__(self, getter = None, setter = None):
-        super().__init__()
-        self.getter = getter
-        self.setter = setter
-        
-    def get(self, *args):
-        if self.getter is None:
-            raise ValueError('query form not supported')
+def make_handler(getter=None, setter=None, set_hooks=None):
+    """Combines query and command functions to a single function"""
+    def handle(query, *args):
+        if query:
+            if getter is None:
+                raise ProtocolError('query form not supported')
+            else:
+                return getter(*args)
         else:
-            return self.getter(*args)
-     
-    def set(self, *args):
-        if self.setter is None:
-            raise ValueError('not settable')
-        else:
-            return self.setter(*args)
+            if setter is None:
+                raise ProtocolError('not settable')
+            else:
+                response = setter(*args)
+                for hook in set_hooks:
+                    hook()
+                return response
+    return handle
 
 class Property:
-    def __init__(self, getter=None, setter=None):
-        self.getter = getter
-        self.setter = setter
+    """The equivalent of `make_handler` in class form"""
+    def __init__(self):        
         self.set_hooks = []
-        
+
+    def getter(self):
+        raise ProtocolError('query form not supported')
+
+    def setter(self):
+        raise ProtocolError('not settable')
+    
+    def __call__(self, query, *args):
+        if query:
+            # This will be called when `<command>? <args>` arrives to the instrument. All output will be reported back to the user.
+            return self.getter(*args)
+        else:
+            # This will be called when `<command> <args>` arrives to the instrument. Any output will be reported to the user.
+            result = self.setter(*args)
+            for hook in self.set_hooks:
+                hook(*args)
+            return result
+    
     def add_set_hook(self, hook):
         """After the value is set, any hooks added through this function
         will be run in the order they were added"""
         self.set_hooks.append(hook)
         
-    def set(self, *args):
-        """This will be called when `<command> <args>` arrives to the instrument.
-        Any output will be reported to the user."""
-        if self.setter is None:
-            raise ValueError('not settable')
-            
-        result = self.setter(*args)
-        for hook in self.set_hooks:
-            hook(*args)
-        return result
 
-    def get(self, *args):
-        """This will be called when `<command>? <args>` arrives to the instrument.
-        All output will be reported back to the user."""
-        if self.getter is None:
-            raise ValueError('query form not supported')
-        else:
-            return self.getter(*args)
+class BoolProperty(Property):
+    def __init__(self, readonly=False, setonly=False, default_value=False):
+        super().__init__()
+        if readonly:
+            self.setter = super().setter
+        elif setonly:
+            self.getter = super().getter
+
+        self.value = default_value
+        self.default_value = default_value
+
+    def getter(self):
+        return '1' if self.value else '0'
+
+    def setter(self, value):
+        if value.getName() == 'number':
+            self.value = (value.number.value != 0)
+        elif value.getName() == 'symbol':
+            if value.symbol == 'ON':
+                self.value = True
+            elif value.symbol == 'OFF':
+                self.value = False
+            else:
+                raise ProtocolError(f"Unrecognized bool value {value.symbol}")
 
 class FloatProperty(Property):
     """Class for a typical settable/queriable value
     Supports MIN/MAX values with `min_max` and UP/DOWN with `steppable`"""
+    SI_prefixes = {'EX':1e18,
+                   'PE':1e15,
+                   'T':1e12,
+                   'G':1e9,
+                   'MA':1e6,
+                   'K':1e3,
+                   'M':1e-3,
+                   'U':1e-6,
+                   'N':1e-9,
+                   'P':1e-12,
+                   'F':1e-15,
+                   'A':1e-18}
     def __init__(self, unit, readonly=False, setonly=False, min_max=False, steppable=False, default_value=0):
+        super().__init__()
         if readonly:
-            super().__init__(self.getter)
+            self.setter = super().setter
         elif setonly:
-            super().__init__(setter=self.setter)
-        else:
-            super().__init__(self.getter, self.setter)
+            self.getter = super().getter
 
-        self.unit = unit
+        self.unit = unit.upper()
         self.min_max = min_max
         self.steppable = steppable
         self.value = default_value
@@ -244,46 +260,53 @@ class FloatProperty(Property):
             self.step = 0
         self.default_value = default_value
         
-    def setter(self, *args):
-        if len(args) == 0:
-            raise ValueError(f"{self.command} takes one parameter")
-        if len(args) > 1:
-            raise ValueError(f"{self.command} takes only one parameter")
-
-        str_value = args[0].lower()
-        
-        if str_value == 'max' or str_value == 'maximum':
-            if self.min_max:
-                self.value = self.min_max[1]
+    def setter(self, parse_value):
+    
+        if parse_value.getName() == "symbol":
+            if parse_value.symbol == 'MAX' or parse_value.symbol == 'MAXIMUM':
+                if self.min_max:
+                    self.value = self.min_max[1]
+                else:
+                    raise ProtocolError("no known maximum value")
+            elif parse_value.symbol == 'MIN' or parse_value.symbol == 'MINIMUM':
+                if self.min_max:
+                    self.value = self.min_max[0]
+                else:
+                    raise ProtocolError("no known minimum value")
+            elif parse_value.symbol == 'UP':
+                if self.steppable:
+                    self.value += self.step
+                else:
+                    raise ProtocolError("not steppable")
+            elif parse_value.symbol == 'DOWN':
+                if self.steppable:
+                    self.value -= self.step
+                else:
+                    raise ProtocolError("not steppable")
+            elif parse_value.symbol == 'DEF' or parse_value.symbol == 'DEFAULT':
+                self.value = self.default_value
+            elif parse_value.symbol == 'INF' or parse_value.symbol == 'INFINITY':
+                self.value = np.inf
+            elif parse_value.symbol == 'NINF' or parse_value.symbol == 'NINFINITY':
+                self.value = -np.inf
+            elif parse_value.symbol == 'NAN':
+                self.value = np.nan
             else:
-                raise ProtocolError("no known maximum value")
-        elif str_value == 'min' or str_value == 'minimum':
-            if self.min_max:
-                self.value = self.min_max[0]
-            else:
-                raise ProtocolError("no known minimum value")
-        elif str_value == 'up':
-            if self.steppable:
-                self.value += self.step
-            else:
-                raise ProtocolError("not steppable")
-        elif str_value == 'down':
-            if self.steppable:
-                self.value -= self.step
-            else:
-                raise ProtocolError("not steppable")
+                raise ProtocolError(f"Unrecognized value {parse_value.symbol}")
+        elif parse_value.getName() == "number":
+            factor = 1
+            suffix = parse_value.number.suffix
+            if suffix:
+                if suffix.endswith(self.unit):
+                    prefix = suffix[:-len(self.unit)]
+                    if prefix:
+                        if suffix == 'MOHM' or suffix == 'MHZ':
+                            factor = 1e6
+                        else:
+                            factor = self.SI_prefixes[prefix]            
+            self.value = parse_value.number.value * factor
         else:
-            if self.unit is not None and str_value.endswith(self.unit.lower()):
-                    value, unit = str_value.split()
-                    try:
-                        self.value = float(value)
-                    except ValueError:
-                        raise ProtocolError("Value formal mismatch '{value}'")
-            else:
-                try:
-                    self.value = float(str_value)
-                except ValueError:
-                    raise ProtocolError("Value formal mismatch '{value}'")
+            raise ProtocolError("not a float value {parse_value}")
                     
         if self.min_max:
             if self.value < self.min_max[0]:
@@ -293,40 +316,51 @@ class FloatProperty(Property):
         
     def getter(self, *args):
         if args:
-            raise ValueError(f"{self.command}? takes no parameters")
+            raise ProtocolError(f"query takes no parameters (got `{args[0]}`)")
         return f"{self.value:g}"
+
+class Status:
+    """This represents a single status data structure as defined by IEEE 488.2.
+    
+    A `Status` object has a condition register, transision settings, an event register
+    and an event enable register. All of those can be made accessible via commands.
+    """
+    pass
 
 class VirtualInstrument(SCPI_receiver):
     """This is a SCPI_receiver with an ability to answer to common IEEE 9887 commands"""
     
+    class StatusBits(IntEnum):
+        pass
+    
     def __init__(self, name):
         super().__init__(name)
-        self.add_command("*IDN", ConstProperty(name))
-        self.add_command("*RST", ExtProperty(setter=self.reset))
-        self.add_command("*TST", ExtProperty(getter=self.test))
-        self.add_command("*OPC", ExtProperty(self.qsync, self.sync))
-        self.add_command("*WAI", ExtProperty(setter=self.wait))
-        self.add_command("*CLS", ExtProperty(setter=self.clear_status))
-        self.add_command("*ESE", ExtProperty(getter=self.se_status, setter=self.enable_se_status))
-        self.add_command("*ESR", ExtProperty(getter=self.se_register))
-        self.add_command("*SRE", ExtProperty(getter=self.qservice_request, setter=self.service_request))
-        self.add_command("*STB", ExtProperty(getter=self.status_byte))
-        self.add_command("*ERR", ExtProperty(getter=self.last_error))
+        self.add_command("*IDN", symbol(name))
+#        self.add_command("*RST", make_handler(setter=self.reset))
+#        self.add_command("*TST", make_handler(getter=self.test))
+#        self.add_command("*OPC", make_handler(self.qsync, self.sync))
+#        self.add_command("*WAI", make_handler(setter=self.wait))
+#        self.add_command("*CLS", make_handler(setter=self.clear_status))
+#        self.add_command("*ESE", make_handler(getter=self.se_status, setter=self.enable_se_status))
+#        self.add_command("*ESR", make_handler(getter=self.se_register))
+#        self.add_command("*SRE", make_handler(getter=self.qservice_request, setter=self.service_request))
+#        self.add_command("*STB", make_handler(getter=self.status_byte))
+        self.add_command("*ERR", make_handler(getter=self.last_error))
         self.error_index = 0
     
-    def reset(self): pass
-    def test(self): pass
-    def qsync(self): pass
-    def sync(self): pass
-    def wait(self): pass
-    def test(self): pass
-    def clear_status(self): pass
-    def se_status(self): pass
-    def enable_se_status(self): pass
-    def se_register(self): pass
-    def qservice_request(self): pass
-    def service_request(self): pass
-    def status_byte(self): pass
+#    def reset(self): pass
+#    def test(self): pass
+#    def qsync(self): pass
+#    def sync(self): pass
+#    def wait(self): pass
+#    def test(self): pass
+#    def clear_status(self): pass
+#    def se_status(self): pass
+#    def enable_se_status(self): pass
+#    def se_register(self): pass
+#    def qservice_request(self): pass
+#    def service_request(self): pass
+#    def status_byte(self): pass
     def last_error(self):
         if self.error_index < len(self.error_log):
             self.error_index += 1
