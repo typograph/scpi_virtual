@@ -47,9 +47,10 @@ class Experiment(threading.Thread):
                 raise
 
 class Server:
-    def __init__(self, experiment_class, local=False, **experiment_kwargs):
+    def __init__(self, experiment_class, local=False, max_clients=100, **experiment_kwargs):
         self.exp_class = experiment_class
         self.exp_kwargs = experiment_kwargs
+        self.max_clients = max_clients
 
         self.sockets = {}
 
@@ -69,7 +70,7 @@ class Server:
     def run(self):
         self.shutdown_event.clear()
         for port, serversocket in self.sockets.items():
-            serversocket.listen(5)
+            serversocket.listen(self.max_clients)
             threading.Thread(target = self.listen,
                              args = (serversocket,),
                              daemon=False).start()

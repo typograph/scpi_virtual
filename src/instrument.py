@@ -130,6 +130,9 @@ class SCPI_receiver:
 
     def process_messages(self):
         while not self.iqueue.empty():
+            if self.oqueue.full():
+                break
+                
             try:
                 line = self.iqueue.get_nowait().decode('latin1').upper()
             except queue.Empty:
@@ -137,16 +140,14 @@ class SCPI_receiver:
                 # is the only consumer
                 break
 
+            responses = []
             try:
                 for response in self.process(line):
-                    if response is not None:
-                        self.oqueue.put(response.encode("latin1") + b'\n')
+                    responses.append(response)
             except ProtocolError as e:
                 self.log_error(f'ERROR: {line} {e}')
-            except queue.Full:
-                # The socket is not sending. Bad.
-                print(f"Queue full on {self.name}")
-                self.oqueue.join() # let's block
+            finally:
+                self.oqueue.put(';'.join(responses).encode("latin1") + b'\n')
 
 def symbol(value):
     """A SCPI handler for a symbol value"""
