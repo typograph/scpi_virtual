@@ -5,21 +5,6 @@ import threading
 import time
 import queue
 
-# class safe_property(property):
-    # def __init__(self, initial, doc=None):
-        # self.lock = threading.Lock()
-        # self.value = initial
-    
-        # def getter(_self):
-            # with self.lock:
-                # return self.value
-                
-        # def setter(_self, value):
-            # with self.lock:
-                # self.value = value
-
-        # super().__init__(fget=getter, fset=setter, doc=doc)
-
 def get_float_value(*args, **kwargs):
     try:
         return instrument.get_float_value(*args, **kwargs)
@@ -99,18 +84,14 @@ class AMI420_RampThread(threading.Thread):
         self.state_change.clear()
 
 class AMI420(instrument.VirtualInstrument):
-    """A virtual Americal Magnetics, Inc. Model 430 power supply programmer.
+    """A virtual Americal Magnetics, Inc. Model 420 power supply programmer.
     
     Following changes have been made due to the nature of this library.
-    * Commands of the form `:A:B:<#segment>?` are not SCPI-compliant and
-        cannot be parsed. `:A:B? <#segment>` should be used instead.
-    * Commands with dashes such as `RAMP-PAUSE` are nor SCPI-compliant and
-        cannot be parsed. The dash was replaced with an undescore.
-    * All front panel functions are NOPs.
     * Error buffer never overflows
     * Boolean parameters accept `ON` and `OFF`
     * All parameters accept `DEFault`
-    * It's not possible to turn the device off.
+    * It's not possible to turn the device off
+    * One can set values explicitely specifying units (G/MIN is not a problem)
     """
 
     def add_notimplemented(self, command, readonly=False, writeonly=False):
