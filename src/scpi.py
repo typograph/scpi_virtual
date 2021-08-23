@@ -119,5 +119,5 @@ program_message = pp.Optional(pp.delimitedList(program_message_unit | pp.SkipTo(
 
 def parse(string):
     results =  program_message.parseString(string, parseAll=True)
-    results.pprint()
+#    results.pprint()
     return results

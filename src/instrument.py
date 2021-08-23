@@ -6,6 +6,12 @@ from enum import IntEnum
 
 class ProtocolError(ValueError):
     pass
+    
+class OutOfRangeError(ProtocolError):
+    pass
+
+class InvalidArgumentError(ProtocolError):
+    pass
 
 class SCPI_receiver:
 
@@ -19,7 +25,7 @@ class SCPI_receiver:
         self.error_log = []
         self.lineending = b'\n'
 
-    def add_command(self, cmd, handler):
+    def add_command(self, cmd, handler, ignore_case=True):
         """Add a SCPI command `cmd` to the list of recognized commands.
         
         The command will be parsed and added in all versions. Short forms
@@ -27,7 +33,7 @@ class SCPI_receiver:
         
         locations = [self.commands]
         optional = False
-        subcmds = cmd.upper().split(':')
+        subcmds = cmd.split(':')
         if subcmds[0] == '[':
             optional = True
         elif subcmds[0].startswith('*'):
@@ -37,7 +43,6 @@ class SCPI_receiver:
             return
         elif subcmds[0] != '':
             raise ValueError(f'Commands should be specified in full form from root (:A[:B]:C)')
-            
         for tkn in subcmds[1:]:
             if len(tkn) == 0:
                 raise ValueError(f'Zero-length command in {cmd}')
@@ -49,18 +54,30 @@ class SCPI_receiver:
                 raise ValueError(f'Empty subcommand in {cmd}')
                         
             next_locations = []
+            
+            long_tkn = tkn.upper()
+            short_tkn = None
+            if ignore_case:
+                if len(tkn) > 3 and tkn[3] in 'AEIOUY':
+                    short_tkn = long_tkn[:3]
+                elif len(tkn) > 4:
+                    short_tkn = long_tkn[:4]
+            elif long_tkn != tkn:
+                m = re.match('[A-Z_0-9]+', tkn)
+                if m:
+                    short_tkn = m.group(0)
+                else:
+                    raise ValueError('Cannot use case in {tkn} @ {cmd}')
+
             for dct in locations:
-                if tkn not in dct:
-                    dct[tkn] = {}
-                    if len(tkn) > 4: # adding short mnemonic
-                        if tkn[3] in 'AEIOUY':
-                            short_tkn = tkn[:3]
-                        else:
-                            short_tkn = tkn[:4]
+                if long_tkn not in dct:
+                    dct[long_tkn] = {}
+                    if short_tkn is not None:
                         if short_tkn in dct:
-                            raise ValueError(f'Duplicate short mnemonic {short_tkn} generated from {tkn.lower()}')
-                        dct[short_tkn] = dct[tkn]
-                next_locations.append(dct[tkn])
+                            raise ValueError(f'Duplicate short mnemonic {short_tkn} generated from {tkn}')
+                        else:
+                            dct[short_tkn] = dct[long_tkn]
+                next_locations.append(dct[long_tkn])
                 if optional:
                     next_locations.append(dct)
                 
@@ -123,10 +140,7 @@ class SCPI_receiver:
 
             handler, parent = self.find(command.header, parent)
 
-#            try:
             yield handler(command.query, *command.args)
-#            except TypeError as e:
-#                raise ProtocolError(f'wrong number of arguments')
 
     def process_messages(self):
         while not self.iqueue.empty():
@@ -177,6 +191,72 @@ def make_handler(getter=None, setter=None, set_hooks=None):
                     hook()
                 return response
     return handle
+
+SI_prefixes = {'EX':1e18,
+               'PE':1e15,
+               'T':1e12,
+               'G':1e9,
+               'MA':1e6,
+               'K':1e3,
+               'M':1e-3,
+               'U':1e-6,
+               'N':1e-9,
+               'P':1e-12,
+               'F':1e-15,
+               'A':1e-18}
+
+def get_float_value(parse_value, min_max, default=None, units=None):
+    vmin, vmax = min_max
+
+    if parse_value.getName() == "symbol":
+        if parse_value.symbol == 'MAX' or parse_value.symbol == 'MAXIMUM':
+            return vmin
+        elif parse_value.symbol == 'MIN' or parse_value.symbol == 'MINIMUM':
+            return vmax
+        elif parse_value.symbol == 'DEF' or parse_value.symbol == 'DEFAULT':
+            if default is None:
+                raise InvalidArgumentError()
+            else:
+                return default
+        else:
+            raise InvalidArgumentError()
+    elif parse_value.getName() == "number":
+        factor = 1
+        suffix = parse_value.number.suffix.upper()
+        if suffix:
+            if units is None:
+                raise InvalidArgumentError()
+            elif isinstance(units, str):
+                units = {units:1}
+            elif isinstance(units, dict):
+                pass
+            else:
+                units = {units.unit:1}
+
+            for unit in units:
+                if unit is None:
+                    continue
+                try:
+                    if suffix.endswith(unit.upper()):
+                        prefix = suffix[:-len(unit)]
+                        if prefix:
+                            factor = SI_prefixes[prefix] * units[unit]
+                        else:
+                            factor = units[unit]
+                        break
+                except KeyError:
+                    continue
+            else:
+                raise InvalidArgumentError()
+        elif isinstance(units, dict):
+            factor = units[None]()
+                    
+        value = parse_value.number.value * factor
+        if value < vmin or value > vmax:
+            raise OutOfRangeError()
+        return value
+    else:
+        raise InvalidArgumentError()
 
 class Property:
     """The equivalent of `make_handler` in class form"""
@@ -234,18 +314,7 @@ class BoolProperty(Property):
 class FloatProperty(Property):
     """Class for a typical settable/queriable value
     Supports MIN/MAX values with `min_max` and UP/DOWN with `steppable`"""
-    SI_prefixes = {'EX':1e18,
-                   'PE':1e15,
-                   'T':1e12,
-                   'G':1e9,
-                   'MA':1e6,
-                   'K':1e3,
-                   'M':1e-3,
-                   'U':1e-6,
-                   'N':1e-9,
-                   'P':1e-12,
-                   'F':1e-15,
-                   'A':1e-18}
+
     def __init__(self, unit, readonly=False, setonly=False, min_max=False, steppable=False, default_value=0):
         super().__init__()
         if readonly:
@@ -304,7 +373,7 @@ class FloatProperty(Property):
                         if suffix == 'MOHM' or suffix == 'MHZ':
                             factor = 1e6
                         else:
-                            factor = self.SI_prefixes[prefix]            
+                            factor = SI_prefixes[prefix] 
             self.value = parse_value.number.value * factor
         else:
             raise ProtocolError("not a float value {parse_value}")
