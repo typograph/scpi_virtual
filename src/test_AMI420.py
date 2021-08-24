@@ -77,16 +77,16 @@ class TestAMI420(unittest.TestCase):
         self.assertRun(':STATE?', '9')
         self.assertEqual(self.magnet.field, 0)
         self.assertRun(':RAMP;:FIELD:MAG?', None, '0.0000')
-        time.sleep(0.5)
+        time.sleep(0.1)
         self.assertRun(':STATE?', '1')
         while tuple(self.magnet.process(':STATE?')) == ('1',):
             time.sleep(0.1)
-        self.assertRun(':STATE?', '2')
+        self.assertRun(':STATE?;:FIELD:MAG?', '2', '10.0000')
         self.assertRun(':ZERO', None)
-        while tuple(self.magnet.process(':STATE?')) == ('1',):
+        time.sleep(0.1)
+        while tuple(self.magnet.process(':STATE?')) == ('6',):
             time.sleep(0.1)
-        self.assertRun(':STATE?', '9')
-        self.assertRun(':FIELD:MAG?', '0.0000')
+        self.assertRun(':STATE?;:FIELD:MAG?', '9', '0.0000')
         self.assertRun(':PAUSE', None)
         time.sleep(1)
         self.assertRun(':STATE?', '2')

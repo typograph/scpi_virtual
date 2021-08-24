@@ -8,19 +8,40 @@ gets their own copy of the instrument and can interact with it independently of 
 
 ```python
 from server import Server, Experiment
-from instrument import VirtualInstrument, FloatProperty
+from instrument import VirtualInstrument, CommandTree, get_float_value, get_bool_value, hookable
 
 class Voltmeter(VirtualInstrument):
+    commands = CommandTree(VirtualInstrument.commands)
+    
+    @commands.add(':VOLTAGE?')
+    def get_voltage(self):
+        return '{:.2f}'.format(self.voltage)
+    
     def __init__(self):
         super().__init__("Voltmeter")
-        self.voltage = FloatProperty('V', readonly=True)
-        self.add_command(":voltage", self.voltage)
+        
+    def reset(self):
+        self.voltage = 0
+        super().reset()
 
 class CurrentSource(VirtualInstrument):
+
+    commands = CommandTree(VirtualInstrument.commands)
+    
+    @commands.add(':current?')
+    def get_current(self):
+        return '{:.2f}'.format(self.current)
+    
+    @commands.add(':current')
+    @hookable('current')
+    def set_current(self, parsed_value):
+        self.current = get_float_value(parsed_value, default=0, min_max=(-10, 10), units='A')
+
     def __init__(self):
         super().__init__("Current source")
-        self.current = FloatProperty('A')
-        self.add_command(":current", self.current)
+
+    def reset(self):
+        self.current = 0
 
 class OhmExperiment(Experiment):
     ports = (PORT_V := 9001,
@@ -33,11 +54,11 @@ class OhmExperiment(Experiment):
             self.PORT_V: Voltmeter(),
             self.PORT_I: CurrentSource()
             }
-        self.instruments[self.PORT_I].current.add_set_hook(self.sync)
+        self.instruments[self.PORT_I].add_hook(self.sync)
                 
     def sync(self, *args):
-        self.instruments[self.PORT_V].voltage.value = \
-            self.instruments[self.PORT_I].current.value * self.resistance
+        self.instruments[self.PORT_V].voltage = \
+            self.instruments[self.PORT_I].current * self.resistance
 
 if __name__ == "__main__":
 
@@ -47,6 +68,7 @@ if __name__ == "__main__":
     except Exception:
         server.shutdown_event.set()
         raise
+
 ```
 
 We can now connect to the server and run code like

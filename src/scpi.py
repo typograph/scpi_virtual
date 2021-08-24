@@ -1,12 +1,11 @@
 import pyparsing as pp
-from pyparsing import pyparsing_common as ppc
+#from pyparsing import pyparsing_common as ppc
+import re
 
 pp.ParserElement.enablePackrat()
 pp.ParserElement.setDefaultWhitespaceChars(pp.srange('[\x00-\x09\x0b-\x20]'))
 
-program_mnemonic = pp.Word(pp.alphas, pp.alphas+'_')
-
-program_mnemonic = pp.Word(pp.alphas, pp.alphas+'_')
+program_mnemonic = pp.Word(pp.alphas, pp.alphanums+'_')
 
 character_program_data = program_mnemonic.copy()
 
@@ -94,20 +93,8 @@ compound_program_header = pp.Combine(pp.Optional(pp.Char(':'))\
                                      + pp.delimitedList(program_mnemonic, delim=':', combine=True))
 common_program_header = pp.Combine(pp.Char('*') + program_mnemonic)
 
-program_header = (common_program_header | compound_program_header)\
-                      .setResultsName('command') \
-                 + pp.Optional(pp.Char('?'), default=False) \
-                      .leaveWhitespace().setParseAction(lambda:True).setResultsName('query')
-
-
-compound_program_header = pp.Combine(pp.Optional(pp.Char(':'))\
-                                     + pp.delimitedList(program_mnemonic, delim=':', combine=True))
-common_program_header = pp.Combine(pp.Char('*') + program_mnemonic)
-
-program_header = (common_program_header | compound_program_header)\
-                      .setResultsName('header') \
-                 + pp.Optional(pp.Char('?'), default=False) \
-                      .leaveWhitespace().setParseAction(lambda t:t[0] == '?').setResultsName('query')
+program_header = pp.Combine((common_program_header | compound_program_header)\
+                 + pp.Optional(pp.Char('?')).leaveWhitespace()).setResultsName('header')
 
 program_message_unit = pp.Group(program_header + 
                                 pp.Optional(pp.Word(pp.ParserElement.DEFAULT_WHITE_CHARS)
@@ -121,3 +108,77 @@ def parse(string):
     results =  program_message.parseString(string, parseAll=True)
 #    results.pprint()
     return results
+
+variative_mnemonic = pp.Forward()
+variative_submnemonic = \
+    (pp.Char('[').suppress() + 
+     pp.Word(pp.alphanums+'_') + 
+     pp.Char(']').suppress()
+    ).setParseAction(lambda t:(False, t[0])) | \
+    (pp.Char('[').suppress() + 
+     variative_mnemonic + 
+     pp.Char(']').suppress()
+    ).setParseAction(lambda t:(False, t))
+
+necessary_submnemonic = pp.Word(pp.alphanums+'_').setParseAction(lambda t:(True, t[0]))
+
+variative_mnemonic_startvar = variative_submnemonic + pp.Optional(variative_mnemonic)
+variative_mnemonic_startnes = necessary_submnemonic + pp.Optional(variative_mnemonic_startvar)
+
+variative_mnemonic << (variative_mnemonic_startvar | variative_mnemonic_startnes).setResultsName('mnemonic')
+
+variative_header = pp.Forward()
+variative_header << (common_program_header.copy().setParseAction(lambda t:(True, [(True, t[0])])) |
+                      pp.OneOrMore((pp.Char(':').suppress() + 
+                                   variative_mnemonic
+                                  ).setParseAction(lambda t:(True, t)).setResultsName('mnemonic') |
+                                  (pp.Char('[').suppress() + 
+                                   variative_header + 
+                                   pp.Char(']').suppress()
+                                  ).setParseAction(lambda t:(False, t)).setResultsName('header')
+                                 ).setResultsName('header').setParseAction(lambda t:t.asList()))
+
+def format_mnemonic_pr(parsed, ignore_case):
+    variants = ['']
+    for necessary, contents in list(parsed):
+        if necessary:
+            variants = [v+contents for v in variants]
+        else:
+            variants.extend([v+contents for v in variants])
+    
+    more_variants = set()
+    for v in variants:
+        long_v = v.upper()
+        more_variants.add(long_v)
+        if ignore_case:
+            if len(long_v) > 3 and long_v[3] in 'AEIOUY':
+                more_variants.add(long_v[:3])
+            elif len(long_v) > 4:
+                more_variants.add(long_v[:4])
+        elif long_v != v:
+            m = re.match('[A-Z_0-9]+', v)
+            if m:
+                more_variants.add(m.group(0))
+            else:
+                raise ValueError('Cannot use case in {v}')
+    
+    return more_variants
+
+def format_header_pr(parsed, ignore_case):
+    formated = []
+    for necessary, contents in parsed.asList():
+        if necessary:
+            formated.append((True, format_mnemonic_pr(contents, ignore_case)))
+        else:
+            formated.append((False, format_header_pr(contents, ignore_case) ))
+    return formated
+
+def parse_variative_header(header, ignore_case=True):
+    if header.endswith('?'):
+        query = True
+        parsed = variative_header.parseString(header[:-1], parseAll=True)
+    else:
+        query = False
+        parsed = variative_header.parseString(header, parseAll=True)
+    
+    return format_header_pr(parsed, ignore_case), query
