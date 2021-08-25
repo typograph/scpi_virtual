@@ -5,11 +5,11 @@
 #
 # The server will run a number of identical parallel experiments, one for every
 # connected user (ID-ed by IP address). The instruments in the experiment
-# will get the requests sent to their port via their input queue and must respond 
+# will get the requests sent to their port via their input queue and must respond
 # using the output queue.
 #
 # Each experiment is in a separate thread, and each port listener also has its own
-# thread. Inter-thread communication is done entirely via i/o queues on the 
+# thread. Inter-thread communication is done entirely via i/o queues on the
 # individual instruments.
 #
 
@@ -17,6 +17,7 @@ import socket
 import threading
 import queue
 import time
+
 
 class Experiment(threading.Thread):
     """The `Experiment` is a thread containing all instruments
@@ -35,7 +36,7 @@ class Experiment(threading.Thread):
         super().__init__(daemon=False)
         self.instruments = {}
         self.end_event = end_event
-    
+
     def run(self):
         """This makes every instrument poll for incoming messages"""
         while not self.end_event.is_set():
@@ -46,15 +47,18 @@ class Experiment(threading.Thread):
                 self.end_event.set()
                 raise
 
+
 class Server:
-    def __init__(self, experiment_class, local=False, max_clients=100, **experiment_kwargs):
+    def __init__(
+        self, experiment_class, local=False, max_clients=100, **experiment_kwargs
+    ):
         self.exp_class = experiment_class
         self.exp_kwargs = experiment_kwargs
         self.max_clients = max_clients
 
         self.sockets = {}
 
-        hostname = 'localhost' if local else socket.gethostbyname(socket.gethostname())
+        hostname = "localhost" if local else socket.gethostbyname(socket.gethostname())
 
         for port in self.exp_class.ports:
             self.sockets[port] = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -71,27 +75,30 @@ class Server:
         self.shutdown_event.clear()
         for port, serversocket in self.sockets.items():
             serversocket.listen(self.max_clients)
-            threading.Thread(target = self.listen,
-                             args = (serversocket,),
-                             daemon=False).start()
+            threading.Thread(
+                target=self.listen, args=(serversocket,), daemon=False
+            ).start()
         while not self.shutdown_event.is_set():
             try:
                 time.sleep(0.05)
             except BaseException as e:
                 self.shutdown_event.set()
                 raise
-                
 
     def instrument(self, port, address):
         with self.instrulock:
             if address not in self.experiments:
-                self.experiments[address] = self.exp_class(self.shutdown_event, **self.exp_kwargs)
+                self.experiments[address] = self.exp_class(
+                    self.shutdown_event, **self.exp_kwargs
+                )
                 self.experiments[address].start()
             try:
                 return self.experiments[address].instruments[port]
             except KeyError as e:
-                raise ValueError(f'No instrument found at port {port}.'
-                                 f'Available ports are {tuple(self.experiments[address].instruments.keys())}')
+                raise ValueError(
+                    f"No instrument found at port {port}."
+                    f"Available ports are {tuple(self.experiments[address].instruments.keys())}"
+                )
 
     def listen(self, serversocket):
         print(f"Listening at {serversocket.getsockname()}")
@@ -102,38 +109,40 @@ class Server:
                 clientsocket.settimeout(1)
                 print(f"Connection from {address}")
                 instrument = self.instrument(serversocket.getsockname()[1], address[0])
-                threading.Thread(target = self.communicate,
-                                 args = (clientsocket,instrument),
-                                 daemon = False).start()
+                threading.Thread(
+                    target=self.communicate,
+                    args=(clientsocket, instrument),
+                    daemon=False,
+                ).start()
             except socket.timeout:
                 pass
             except BaseException:
                 self.shutdown_event.set()
                 raise
 
-# Locks
-#
-# The socket-listening thread needs write access to its instrument.
-# A change of a parameter may trigger an experiment hook, which will write
-# to the same instrument (no problem) or to a different instrument (problem,
-# if another socket-listening thread tries to change that different instrument
-# at the same time).
-#
-# The most obvious solution would be to put a lock on every instrument,
-# that would be acquired by the socket thread and/or experiment as needed.
-# But this is a problem, because experiment might try to lock
-# the same instrument during the update loop, which will deadlock the threads.
-#
-# Next solution would be to lock every experiment, so that only one socket
-# can talk to the experiment at a time. This might be a problem if there
-# are any instruments that must be controlled in parallel. E.g. a long measurement
-# on one while changing some things on the other.
-#
-# It should be possible to just set up a message queue and lock that.
-# The socket thread will write to the input queue, and will read the
-# response from the output queue. The experiment will make the instruments
-# poll the queues with a certain periodicity.
-#
+    # Locks
+    #
+    # The socket-listening thread needs write access to its instrument.
+    # A change of a parameter may trigger an experiment hook, which will write
+    # to the same instrument (no problem) or to a different instrument (problem,
+    # if another socket-listening thread tries to change that different instrument
+    # at the same time).
+    #
+    # The most obvious solution would be to put a lock on every instrument,
+    # that would be acquired by the socket thread and/or experiment as needed.
+    # But this is a problem, because experiment might try to lock
+    # the same instrument during the update loop, which will deadlock the threads.
+    #
+    # Next solution would be to lock every experiment, so that only one socket
+    # can talk to the experiment at a time. This might be a problem if there
+    # are any instruments that must be controlled in parallel. E.g. a long measurement
+    # on one while changing some things on the other.
+    #
+    # It should be possible to just set up a message queue and lock that.
+    # The socket thread will write to the input queue, and will read the
+    # response from the output queue. The experiment will make the instruments
+    # poll the queues with a certain periodicity.
+    #
     def communicate(self, datasocket, instrument):
         line_end_chars = instrument.lineending
         datasocket.settimeout(0.05)
@@ -152,9 +161,9 @@ class Server:
                     except queue.Full:
                         # OK, this is bad, the instrument is not processing for some reason.
                         print(f"Queue full on {instrument.name}:{datasocket.port}")
-                        instrument.iqueue.join() # That might block indefinitely
+                        instrument.iqueue.join()  # That might block indefinitely
                         instrument.iqueue.put(cmd)
-                        
+
             except socket.timeout:
                 pass
             except BaseException:
