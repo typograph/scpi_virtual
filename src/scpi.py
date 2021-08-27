@@ -1,6 +1,15 @@
 import pyparsing as pp
-#from pyparsing import pyparsing_common as ppc
 import re
+
+"""Parsers for IEEE 488 / SCPI commands and command descriptors.
+
+Note: expressions are not yet supported
+
+There are two functions of interest:
+
+    `parse_message(command_line)` parses a PROGRAM_MESSAGE as defined in IEEE 488.2
+    `parse_variative_header(header)` parses a command header with optional parts
+"""
 
 pp.ParserElement.enablePackrat()
 pp.ParserElement.setDefaultWhitespaceChars(pp.srange('[\x00-\x09\x0b-\x20]'))
@@ -104,10 +113,8 @@ program_message_unit = pp.Group(program_header +
                                )
 program_message = pp.Optional(pp.delimitedList(program_message_unit | pp.SkipTo(pp.StringEnd())('error'), delim=';')('commands'))
 
-def parse(string):
-    results =  program_message.parseString(string, parseAll=True)
-#    results.pprint()
-    return results
+def parse_message(string):
+    return program_message.parseString(string, parseAll=True)
 
 variative_mnemonic = pp.Forward()
 variative_submnemonic = \
@@ -138,6 +145,29 @@ variative_header << (common_program_header.copy().setParseAction(lambda t:(True,
                                   ).setParseAction(lambda t:(False, t)).setResultsName('header')
                                  ).setResultsName('header').setParseAction(lambda t:t.asList()))
 
+def short_mnemonic_form(term, ignore_case=True):
+    term_caps = term.upper()
+    if ignore_case:
+        if len(term) > 3 and term_caps[3] in 'AEIOUY':
+            return term_caps[:3]
+        elif len(term) > 4:
+            return term_caps[:4]
+    elif term != term_caps:
+        m = re.match('[A-Z_0-9]+', term)
+        if m:
+            return m.group(0)
+        else:
+            raise ValueError('Cannot use case in {v}')
+    else:
+        return None
+
+def all_mnemonic_forms(term, ignore_case=True):
+    short_form = short_mnemonic_form(term)
+    if short_form is None:
+        return {term.upper()}
+    else:
+        return {term.upper(), short_form}
+
 def format_mnemonic_pr(parsed, ignore_case):
     variants = ['']
     for necessary, contents in list(parsed):
@@ -148,19 +178,10 @@ def format_mnemonic_pr(parsed, ignore_case):
     
     more_variants = set()
     for v in variants:
-        long_v = v.upper()
-        more_variants.add(long_v)
-        if ignore_case:
-            if len(long_v) > 3 and long_v[3] in 'AEIOUY':
-                more_variants.add(long_v[:3])
-            elif len(long_v) > 4:
-                more_variants.add(long_v[:4])
-        elif long_v != v:
-            m = re.match('[A-Z_0-9]+', v)
-            if m:
-                more_variants.add(m.group(0))
-            else:
-                raise ValueError('Cannot use case in {v}')
+        more_variants.add(v.upper())
+        short_form = short_mnemonic_form(v, ignore_case)
+        if short_form is not None:
+            more_variants.add(short_form)
     
     return more_variants
 

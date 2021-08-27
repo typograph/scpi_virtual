@@ -42,7 +42,7 @@ class TestAMI420(unittest.TestCase):
         self.assertRun(':FIELD:PROG?;:RAMP:RATE:FIELD?;:RAMP:FIELD?',
                        '2.0000',    '0.0300',         '2.0000,0.0300')
         self.assertRun('CONF:FIELD:PROG 1;:FIELD:PROG?;:RAMP:FIELD?',
-                        None,            '1.0000',    '1.0000,0.0300')
+                       None,             '1.0000',    '1.0000,0.0300')
         self.assertRun('CONF:RAMP:RATE:FIELD 0.3;:RAMP:RATE:FIELD?;:RAMP:FIELD?',
                        None,                    '0.3000',         '1.0000,0.3000')
         
@@ -87,8 +87,10 @@ class TestAMI420(unittest.TestCase):
         while tuple(self.magnet.process(':STATE?')) == ('6',):
             time.sleep(0.1)
         self.assertRun(':STATE?;:FIELD:MAG?', '9', '0.0000')
+        self.assertRun(':RAMP', None)
+        time.sleep(0.1)
         self.assertRun(':PAUSE', None)
-        time.sleep(1)
+        time.sleep(0.1)
         self.assertRun(':STATE?', '2')
-        self.assertNonEqual(tuple(self.magnet.process(':FIELD:MAGNET?')), ('0.0000',))
-        self.assertNonEqual(tuple(self.magnet.process(':FIELD:MAGNET?')), ('10.0000',))
+        self.assertNotEqual(tuple(self.magnet.process(':FIELD:MAGNET?')), ('0.0000',))
+        self.assertNotEqual(tuple(self.magnet.process(':FIELD:MAGNET?')), ('10.0000',))

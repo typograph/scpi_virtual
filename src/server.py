@@ -47,14 +47,17 @@ class Experiment(threading.Thread):
                 raise
 
 class Server:
-    def __init__(self, experiment_class, local=False, max_clients=100, **experiment_kwargs):
+    def __init__(self, experiment_class, local=False, ip=None, max_clients=100, **experiment_kwargs):
         self.exp_class = experiment_class
         self.exp_kwargs = experiment_kwargs
         self.max_clients = max_clients
 
         self.sockets = {}
 
-        hostname = 'localhost' if local else socket.gethostbyname(socket.gethostname())
+        if ip is None:
+            ip = socket.gethostbyname(socket.gethostname())
+            
+        hostname = 'localhost' if local else ip
 
         for port in self.exp_class.ports:
             self.sockets[port] = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -77,6 +80,8 @@ class Server:
         while not self.shutdown_event.is_set():
             try:
                 time.sleep(0.05)
+            except KeyboardInterrupt:
+                self.shutdown_event.set()
             except BaseException as e:
                 self.shutdown_event.set()
                 raise
@@ -94,7 +99,7 @@ class Server:
                                  f'Available ports are {tuple(self.experiments[address].instruments.keys())}')
 
     def listen(self, serversocket):
-        print(f"Listening at {serversocket.getsockname()}")
+        print(f"Listening at port {serversocket.getsockname()}")
         while not self.shutdown_event.is_set():
             # accept connections from outside
             try:
@@ -147,6 +152,8 @@ class Server:
                 commands = things.split(line_end_chars)
                 self.buffer = commands[-1]
                 for cmd in commands[:-1]:
+                    print(f'{datasocket.getpeername()[0]} : {datasocket.getsockname()[1]}'
+                          f' >> {cmd.decode("latin1").strip()}')
                     try:
                         instrument.iqueue.put(cmd)
                     except queue.Full:
@@ -157,13 +164,24 @@ class Server:
                         
             except socket.timeout:
                 pass
+            except ConnectionAbortedError:
+                return
+            except ConnectionResetError:
+                return  
             except BaseException:
                 self.shutdown_event.set()
                 raise
 
             while not instrument.oqueue.empty():
                 try:
-                    datasocket.send(instrument.oqueue.get(timeout=0.05))
+                    response = instrument.oqueue.get(timeout=0.05)
+                    print(f'{datasocket.getpeername()[0]} : {datasocket.getsockname()[1]}'
+                          f" << {response.decode('latin1').strip()}")
+                    datasocket.send(response + line_end_chars)
+                except ConnectionAbortedError:
+                    return
+                except ConnectionResetError:
+                    return
                 except queue.Empty:
                     # This thread is the only consumer, so this outcome
                     # is almost impossible, but even if the queue is empty,

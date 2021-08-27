@@ -2,7 +2,7 @@ import queue
 import re
 import scpi
 import numpy as np
-from enum import IntEnum
+from enum import Enum, IntEnum
 
 class ProtocolError(ValueError):
     pass
@@ -111,7 +111,7 @@ class SCPI_receiver:
         """
         # This is a generator function so that the beginning of the line gets processed even if an error is encountered later
         parent = ''
-        for command in scpi.parse(line).commands:
+        for command in scpi.parse_message(line).commands:
 
             if isinstance(command, str):
                 raise ProtocolError(f'Unparseable command `{command}`')
@@ -159,11 +159,13 @@ class SCPI_receiver:
             responses = []
             try:
                 for response in self.process(line):
-                    responses.append(response)
+                    if response is not None:
+                        responses.append(response)
             except ProtocolError as e:
                 self.log_error(f'ERROR: {line} {e}')
             finally:
-                self.oqueue.put(';'.join(responses).encode("latin1") + b'\n')
+                if responses:
+                    self.oqueue.put(';'.join(responses).encode("latin1"))
 
 SI_prefixes = {'EX':1e18,
                'PE':1e15,
@@ -242,6 +244,24 @@ def get_bool_value(parsed_value, default=False):
         else:
             raise ProtocolError(f"Unrecognized bool value {parsed_value.symbol}")
 
+def get_symbol_value(cls, parsed_value):
+    if parsed_value.getName() != 'symbol':
+        raise ProtocolError(f"Invalid parameter {parsed_value}")
+    try:
+        return cls[parse_value.symbol]
+    except KeyError:
+        raise ProtocolError(f'Invalid parameter {parsed_value}')
+
+def scpi_enum(class_name, members, ignore_case=True):
+    caps_members = [member.upper() for member in members]
+    cls =  Enum(class_name, caps_members)
+    for term, caps_term in zip(members, caps_members):
+        short_form = scpi.short_mnemonic_form(term, ignore_case)
+        if short_form is not None:
+            if short_form not in cls._member_map_:
+                cls._member_map_[short_form] = cls[caps_term]
+    return cls
+
 class Status:
     """This represents a single status data structure as defined by IEEE 488.2.
     
@@ -266,6 +286,7 @@ class VirtualInstrument(SCPI_receiver):
     """This is a SCPI_receiver with an ability to answer to common IEEE 9887 commands"""
 
     commands = CommandTree()
+    defaults = dict()
     
     class StatusBits(IntEnum):
         pass
@@ -292,7 +313,8 @@ class VirtualInstrument(SCPI_receiver):
         self.reset()
         
     def reset(self):
-        pass
+        for name, value in self.defaults.items():
+            setattr(self, name, value)
 
     @commands.add('*TST?')
     def _test(self): # Otherwise cannot be reimplemented in subclasses

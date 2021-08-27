@@ -5,6 +5,9 @@ import threading
 import time
 import queue
 
+from instrument import VirtualInstrument as VI
+from instrument import CommandTree as CT
+
 def get_float_value(*args, **kwargs):
     try:
         return instrument.get_float_value(*args, **kwargs)
@@ -90,7 +93,7 @@ def not_implemented(self, *args):
     raise ProtocolError(f'not implemented')
 
     
-class AMI420(instrument.VirtualInstrument):
+class AMI420(VI):
     """A virtual Americal Magnetics, Inc. Model 420 power supply programmer.
     
     Following changes have been made due to the nature of this library.
@@ -101,8 +104,8 @@ class AMI420(instrument.VirtualInstrument):
     * One can set values explicitely specifying units (G/MIN is not a problem)
     """
 
-    commands = instrument.CommandTree(instrument.VirtualInstrument.commands, ignore_case=False)
-    
+    commands = CT(VI.commands, ignore_case=False)
+    defaults = dict(VI.defaults)
 
 # System-Related Commands
 
@@ -124,7 +127,6 @@ class AMI420(instrument.VirtualInstrument):
     commands['*ETE?'] = not_implemented # <enable_value>
     commands['*TRG'] = not_implemented
 
-
     @commands.add(':SYSTem:TIME?')
     def runtime(self):
         delta = datetime.datetime.now() - self.poweron_time
@@ -145,7 +147,8 @@ class AMI420(instrument.VirtualInstrument):
     commands[':SUPPly:TYPE'] = lambda s:'9'
     # -10 -- 10
     commands[':SUPPly:MODE'] = lambda s:'3'
-    
+
+    defaults['stability'] = 0.0
     @commands.add(':STABility?')
     def get_stability(self):
         return '{:.4f}'.format(self.stability)
@@ -154,6 +157,9 @@ class AMI420(instrument.VirtualInstrument):
     def set_stability(self, parsed_value):
         self.stability = get_float_value(parsed_value, default=0.0, min_max=(0.0,100.0))
 
+
+    defaults['current_limit'] = 100.0
+    
     @commands.add(':CURRent:LIMit?')
     def get_current_limit(self):
         return '{:.4f}'.format(self.current_limit)
@@ -212,6 +218,7 @@ class AMI420(instrument.VirtualInstrument):
         else:
             raise ValueError(f'Unknown ramp rate units {self.ramp_rate_units}')
     
+    defaults['ramp_rate_units'] = RAMP_RATE_SECONDS
         
     @commands.add(':RAMP:RATE:UNITS?')
     def get_ramp_rate_units(self):
@@ -221,6 +228,8 @@ class AMI420(instrument.VirtualInstrument):
     def set_ramp_rate_units(self, parsed_value):
         self.ramp_rate_units = instrument.get_bool_value(parsed_value)
         
+    defaults['field_units'] = FIELD_KILOGAUSS
+
     @commands.add(':FIELD:UNITS?')
     def get_field_units(self):
         return str(int(self.field_units))
@@ -231,6 +240,7 @@ class AMI420(instrument.VirtualInstrument):
 
 # Ramp Target/Rate Configuration Commands and Queries
 
+    defaults['voltage_limit'] = 10.0
     @commands.add(':VOLTage:LIMit?')
     def get_voltage_limit(self):
         return '{:.4f}'.format(self.voltage_limit)
@@ -239,6 +249,7 @@ class AMI420(instrument.VirtualInstrument):
     def set_voltage_limit(self, parsed_value): # <voltage (V)>
         self.voltage_limit = get_float_value(parsed_value, default=10.0, min_max=(0,10))
 
+    defaults['field_target'] = 0.0
     @commands.add(':FIELD:PROGram?')
     def get_field_target(self):
         return '{:.4f}'.format(self.field_target / self.field_unit_multiplier())
@@ -251,6 +262,7 @@ class AMI420(instrument.VirtualInstrument):
                                                               'G':1e-4,
                                                                None:self.field_unit_multiplier})
 
+    defaults['field_rate'] = 0.0
     @commands.add(':RAMP:RATE:FIELd?')
     def get_field_rate(self):
         return f'{self.field_rate/self.ramp_unit_multiplier()/self.field_unit_multiplier():.4f}'
@@ -332,12 +344,14 @@ class AMI420(instrument.VirtualInstrument):
         
 # Measurement Commands and Queries
 
+    defaults['voltage'] = 0
     @commands.add(':VOLTage:MAGnet?')
     # In our ideal universe, the supply voltage drops only in the magnet
     @commands.add(':VOLTage:SUPPly?')
     def get_voltage(self):
         return f'{self.voltage:.4f}'
 
+    defaults['field'] = 0
     @commands.add(':CURRent:MAGnet?')
     @commands.add(':CURRent:SUPPly?')
     def get_current(self):
@@ -347,7 +361,10 @@ class AMI420(instrument.VirtualInstrument):
     def get_field(self):\
         return f'{self.field/self.field_unit_multiplier():.4f}'
         
-# Protection Setup Configuration Commands and Queries
+# Protection Setup Configuration Commands and 
+
+    defaults['quench_detect'] = False
+
     @commands.add(':QUench:DETect?')
     def get_quench_detect(self):
         return str(int(self.quench_detect))
@@ -373,21 +390,6 @@ class AMI420(instrument.VirtualInstrument):
     @commands.add('*RST')
     def reset(self):
         self.reset_time()
-        
-        self.voltage = 0
-        self.field = 0
-        
-        self.stability = 0.0
-        self.voltage_limit = 10.0
-        self.current_limit = 100.0
-        
-        self.ramp_rate_units = self.RAMP_RATE_SECONDS
-        self.field_units = self.FIELD_KILOGAUSS
-
-        self.field_target = 0.0
-        self.field_rate = 0.0
-        self.quench_detect = False
-        
         super().reset()
     
     def __init__(self, coil_constant, inductance):
